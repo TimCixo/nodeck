@@ -27,6 +27,13 @@ type RouteItem = {
   group: 'core' | 'create';
 };
 
+type RouteDetail = {
+  eyebrow: string;
+  title: string;
+  summary: string;
+  items: string[];
+};
+
 const routes: RouteItem[] = [
   { path: '/gallery', label: 'Gallery', icon: GalleryVerticalEnd, group: 'core' },
   { path: '/favorites', label: 'Favorites', icon: Heart, group: 'core' },
@@ -40,6 +47,81 @@ const routes: RouteItem[] = [
 const routeTitles = new Map<string, string>([
   ['/', 'Home'],
   ...routes.map((route) => [route.path, route.label] as const),
+]);
+
+const routeDetails = new Map<string, RouteDetail>([
+  [
+    '/',
+    {
+      eyebrow: 'Home',
+      title: 'Nodeck',
+      summary: 'Card-centered gallery navigation for visual objects, tags, and decks.',
+      items: ['Browse saved cards', 'Open deck collections', 'Prepare new gallery entries'],
+    },
+  ],
+  [
+    '/gallery',
+    {
+      eyebrow: 'Gallery',
+      title: 'Gallery',
+      summary: 'The future browsing surface for saved visual objects.',
+      items: ['Media grid placeholder', 'Card previews', 'Filter-ready layout'],
+    },
+  ],
+  [
+    '/favorites',
+    {
+      eyebrow: 'Favorites',
+      title: 'Favorites',
+      summary: 'A focused area for saved cards and decks.',
+      items: ['Pinned cards', 'Saved decks', 'Quick return paths'],
+    },
+  ],
+  [
+    '/cards',
+    {
+      eyebrow: 'Cards',
+      title: 'Cards',
+      summary: 'Semi-technical card management placeholder.',
+      items: ['Card records', 'Object metadata', 'Future import state'],
+    },
+  ],
+  [
+    '/decks',
+    {
+      eyebrow: 'Decks',
+      title: 'Decks',
+      summary: 'Semi-technical deck management placeholder.',
+      items: ['Deck records', 'Card membership', 'Collection structure'],
+    },
+  ],
+  [
+    '/tags',
+    {
+      eyebrow: 'Tags',
+      title: 'Tags',
+      summary: 'The future index for visual grouping and discovery.',
+      items: ['Tag cards', 'Related objects', 'Filter entry points'],
+    },
+  ],
+  [
+    '/cards/new',
+    {
+      eyebrow: 'Create',
+      title: 'Create Card',
+      summary: 'Reserved route for adding a new visual object card.',
+      items: ['Card draft', 'Source details', 'Tag assignment'],
+    },
+  ],
+  [
+    '/decks/new',
+    {
+      eyebrow: 'Create',
+      title: 'Create Deck',
+      summary: 'Reserved route for assembling a new card collection.',
+      items: ['Deck draft', 'Card selection', 'Collection metadata'],
+    },
+  ],
 ]);
 
 function getCurrentPath() {
@@ -85,6 +167,12 @@ function App() {
   }, [currentPath]);
 
   const title = routeTitles.get(currentPath) ?? 'Not Found';
+  const routeDetail = routeDetails.get(currentPath) ?? {
+    eyebrow: 'Missing',
+    title,
+    summary: 'No matching Nodeck route exists for this URL.',
+    items: ['Use the sidebar', 'Return home', 'Choose a known route'],
+  };
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -135,8 +223,10 @@ function App() {
             <section className="mx-auto flex w-full max-w-5xl flex-col gap-5">
               <div className="flex items-center justify-between gap-3">
                 <div>
-                  <Badge variant="outline">Nodeck</Badge>
-                  <h1 className="mt-3 text-2xl font-semibold tracking-normal">{title}</h1>
+                  <Badge variant="outline">{routeDetail.eyebrow}</Badge>
+                  <h1 className="mt-3 text-2xl font-semibold tracking-normal">
+                    {routeDetail.title}
+                  </h1>
                 </div>
                 {currentPath !== '/' ? (
                   <a
@@ -152,14 +242,17 @@ function App() {
 
               <Card>
                 <CardHeader>
-                  <CardTitle>{title}</CardTitle>
+                  <CardTitle>{routeDetail.summary}</CardTitle>
                 </CardHeader>
-                <CardContent>
-                  <p className="text-muted-foreground text-sm">
-                    {currentPath === '/'
-                      ? 'Navigation entry point for the card-centered gallery.'
-                      : 'Placeholder route ready for future Nodeck content.'}
-                  </p>
+                <CardContent className="grid gap-3 sm:grid-cols-3">
+                  {routeDetail.items.map((item) => (
+                    <div
+                      key={item}
+                      className="border-border bg-muted/30 rounded-lg border px-3 py-2 text-sm"
+                    >
+                      {item}
+                    </div>
+                  ))}
                 </CardContent>
               </Card>
             </section>
