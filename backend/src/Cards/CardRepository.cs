@@ -28,54 +28,18 @@ public sealed class CardRepository
 
         try
         {
-            cardId = await connection.ExecuteScalarAsync<long>(
-                """
-                INSERT INTO cards (type, title, preview, properties, metadata)
-                VALUES (@Type, @Title, NULL, @Properties, @Metadata);
-                SELECT LAST_INSERT_ID();
-                """,
-                new
-                {
-                    data.Type,
-                    data.Title,
-                    Properties = data.PropertiesJson,
-                    Metadata = data.Metadata.ToJsonString(),
-                },
-                transaction);
-
+            cardId = await InsertCardAsync(connection, transaction, data.Type, data.Title, data.PropertiesJson, data.Metadata);
             var assets = await createAssets(cardId);
             var previewPath = assets?.PreviewPath;
             var metadata = data.Metadata;
 
             if (assets is not null)
             {
-                metadata["media_type"] = assets.MediaType;
-                metadata["mime_type"] = assets.MimeType;
-                metadata["original_file_name"] = assets.OriginalFileName;
-                metadata["content_path"] = assets.ContentPath;
-                metadata["preview_path"] = assets.PreviewPath;
-                metadata["file_size"] = assets.FileSize;
-                metadata["width"] = assets.Width;
-                metadata["height"] = assets.Height;
+                ApplyAssetMetadata(metadata, assets);
             }
 
-            await connection.ExecuteAsync(
-                """
-                UPDATE cards
-                SET preview = @Preview,
-                    metadata = @Metadata
-                WHERE id = @Id;
-                """,
-                new
-                {
-                    Id = cardId,
-                    Preview = previewPath,
-                    Metadata = metadata.ToJsonString(),
-                },
-                transaction);
-
+            await UpdateCardAssetsAsync(connection, transaction, cardId, previewPath, metadata);
             await InsertRelationsAsync(connection, transaction, cardId, data.Relations);
-
             await transaction.CommitAsync();
 
             return await GetByIdAsync(cardId)
@@ -94,8 +58,89 @@ public sealed class CardRepository
         }
     }
 
+    public async Task<CardDetails> CreateCollectionAsync(
+        CreateCardCollectionData data,
+        Func<long, IFormFile, Task<CardFileAssets>> createAssets,
+        Action<long> cleanupAssets)
+    {
+        await using var connection = new MySqlConnection(_connectionString);
+        await connection.OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        var createdCardIds = new List<long>();
+
+        try
+        {
+            var parentId = await InsertCardAsync(connection, transaction, data.Type, data.Title, data.PropertiesJson, data.Metadata);
+            createdCardIds.Add(parentId);
+            long? previousMediaId = null;
+            string? parentPreviewPath = null;
+
+            for (var index = 0; index < data.Images.Count; index++)
+            {
+                var mediaMetadata = CreateMetadata();
+                var mediaId = await InsertCardAsync(connection, transaction, "media", null, null, mediaMetadata);
+                createdCardIds.Add(mediaId);
+
+                var assets = await createAssets(mediaId, data.Images[index]);
+                ApplyAssetMetadata(mediaMetadata, assets);
+                await UpdateCardAssetsAsync(connection, transaction, mediaId, assets.PreviewPath, mediaMetadata);
+
+                parentPreviewPath ??= assets.PreviewPath;
+
+                await InsertRelationsAsync(
+                    connection,
+                    transaction,
+                    parentId,
+                    [
+                        new CreateRelationData(
+                            mediaId,
+                            "contains",
+                            new JsonObject { ["position"] = index }.ToJsonString(),
+                            CreateMetadata()),
+                    ]);
+
+                if (data.Type == "comic" && previousMediaId is not null)
+                {
+                    await InsertRelationsAsync(
+                        connection,
+                        transaction,
+                        previousMediaId.Value,
+                        [
+                            new CreateRelationData(
+                                mediaId,
+                                "next_in_sequence",
+                                null,
+                                CreateMetadata()),
+                        ]);
+                }
+
+                previousMediaId = mediaId;
+            }
+
+            data.Metadata["preview_path"] = parentPreviewPath;
+            data.Metadata["contained_count"] = data.Images.Count;
+            await UpdateCardAssetsAsync(connection, transaction, parentId, parentPreviewPath, data.Metadata);
+            await InsertRelationsAsync(connection, transaction, parentId, data.Relations);
+            await transaction.CommitAsync();
+
+            return await GetByIdAsync(parentId)
+                ?? throw new InvalidOperationException("Created card could not be loaded.");
+        }
+        catch
+        {
+            await transaction.RollbackAsync();
+
+            foreach (var cardId in createdCardIds)
+            {
+                cleanupAssets(cardId);
+            }
+
+            throw;
+        }
+    }
+
     public async Task<IReadOnlyList<CardSummary>> ListAsync(
-        string? type,
+        IReadOnlyList<string> types,
         string? mediaType,
         string? search,
         string sort,
@@ -106,10 +151,10 @@ public sealed class CardRepository
         var conditions = new List<string>();
         var parameters = new DynamicParameters();
 
-        if (!string.IsNullOrWhiteSpace(type))
+        if (types.Count > 0)
         {
-            conditions.Add("type = @Type");
-            parameters.Add("Type", type);
+            conditions.Add("type IN @Types");
+            parameters.Add("Types", types);
         }
 
         if (!string.IsNullOrWhiteSpace(mediaType))
@@ -180,19 +225,12 @@ public sealed class CardRepository
             return null;
         }
 
-        var metadata = ParseRequiredJson(card.Metadata);
+        var metadata = ParseRequiredJsonObject(card.Metadata);
         var previewPath = card.Preview;
 
         if (data.Assets is not null)
         {
-            metadata["media_type"] = data.Assets.MediaType;
-            metadata["mime_type"] = data.Assets.MimeType;
-            metadata["original_file_name"] = data.Assets.OriginalFileName;
-            metadata["content_path"] = data.Assets.ContentPath;
-            metadata["preview_path"] = data.Assets.PreviewPath;
-            metadata["file_size"] = data.Assets.FileSize;
-            metadata["width"] = data.Assets.Width;
-            metadata["height"] = data.Assets.Height;
+            ApplyAssetMetadata(metadata, data.Assets);
             previewPath = data.Assets.PreviewPath;
         }
 
@@ -269,8 +307,56 @@ public sealed class CardRepository
 
         var outgoing = await GetRelationsAsync(connection, "from_card_id = @Id", id);
         var incoming = await GetRelationsAsync(connection, "to_card_id = @Id", id);
+        var containedCards = await GetContainedCardsAsync(connection, id);
 
-        return ToDetails(card, outgoing, incoming);
+        return ToDetails(card, outgoing, incoming, containedCards);
+    }
+
+    private static async Task<long> InsertCardAsync(
+        IDbConnection connection,
+        IDbTransaction transaction,
+        string type,
+        string? title,
+        string? propertiesJson,
+        JsonObject metadata)
+    {
+        return await connection.ExecuteScalarAsync<long>(
+            """
+            INSERT INTO cards (type, title, preview, properties, metadata)
+            VALUES (@Type, @Title, NULL, @Properties, @Metadata);
+            SELECT LAST_INSERT_ID();
+            """,
+            new
+            {
+                Type = type,
+                Title = title,
+                Properties = propertiesJson,
+                Metadata = metadata.ToJsonString(),
+            },
+            transaction);
+    }
+
+    private static async Task UpdateCardAssetsAsync(
+        IDbConnection connection,
+        IDbTransaction transaction,
+        long cardId,
+        string? previewPath,
+        JsonObject metadata)
+    {
+        await connection.ExecuteAsync(
+            """
+            UPDATE cards
+            SET preview = @Preview,
+                metadata = @Metadata
+            WHERE id = @Id;
+            """,
+            new
+            {
+                Id = cardId,
+                Preview = previewPath,
+                Metadata = metadata.ToJsonString(),
+            },
+            transaction);
     }
 
     private static async Task<IReadOnlyList<CardRelationResponse>> GetRelationsAsync(
@@ -294,6 +380,30 @@ public sealed class CardRepository
             new { Id = id });
 
         return rows.Select(ToRelation).ToList();
+    }
+
+    private static async Task<IReadOnlyList<ContainedCardResponse>> GetContainedCardsAsync(
+        IDbConnection connection,
+        long id)
+    {
+        var rows = await connection.QueryAsync<ContainedCardRow>(
+            """
+            SELECT
+                c.id AS Id,
+                c.type AS Type,
+                c.title AS Title,
+                c.preview AS Preview,
+                c.metadata AS Metadata,
+                CAST(JSON_UNQUOTE(JSON_EXTRACT(r.properties, '$.position')) AS SIGNED) AS Position
+            FROM card_relations r
+            JOIN cards c ON c.id = r.to_card_id
+            WHERE r.from_card_id = @Id
+              AND r.relation_type = 'contains'
+            ORDER BY Position ASC, r.id ASC;
+            """,
+            new { Id = id });
+
+        return rows.Select(ToContainedCard).ToList();
     }
 
     private static async Task InsertRelationsAsync(
@@ -351,7 +461,8 @@ public sealed class CardRepository
     private static CardDetails ToDetails(
         DbCard card,
         IReadOnlyList<CardRelationResponse> outgoingRelations,
-        IReadOnlyList<CardRelationResponse> incomingRelations)
+        IReadOnlyList<CardRelationResponse> incomingRelations,
+        IReadOnlyList<ContainedCardResponse> containedCards)
     {
         var summary = ToSummary(card);
 
@@ -364,7 +475,8 @@ public sealed class CardRepository
             summary.Properties,
             summary.Metadata,
             outgoingRelations,
-            incomingRelations);
+            incomingRelations,
+            containedCards);
     }
 
     private static CardRelationResponse ToRelation(DbCardRelation relation)
@@ -378,8 +490,43 @@ public sealed class CardRepository
             ParseRequiredJson(relation.Metadata));
     }
 
+    private static ContainedCardResponse ToContainedCard(ContainedCardRow card)
+    {
+        var metadata = ParseRequiredJson(card.Metadata);
+        var contentPath = metadata["content_path"]?.GetValue<string>();
+
+        return new ContainedCardResponse(
+            card.Id,
+            card.Type,
+            card.Title,
+            card.Preview is null ? null : $"/api/cards/{card.Id}/preview",
+            contentPath is null ? null : $"/api/cards/{card.Id}/content",
+            card.Position);
+    }
+
+    private static JsonObject CreateMetadata() =>
+        new()
+        {
+            ["created_at"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+        };
+
+    private static void ApplyAssetMetadata(JsonObject metadata, CardFileAssets assets)
+    {
+        metadata["media_type"] = assets.MediaType;
+        metadata["mime_type"] = assets.MimeType;
+        metadata["original_file_name"] = assets.OriginalFileName;
+        metadata["content_path"] = assets.ContentPath;
+        metadata["preview_path"] = assets.PreviewPath;
+        metadata["file_size"] = assets.FileSize;
+        metadata["width"] = assets.Width;
+        metadata["height"] = assets.Height;
+    }
+
     private static JsonNode ParseRequiredJson(string json) =>
         JsonNode.Parse(json) ?? new JsonObject();
+
+    private static JsonObject ParseRequiredJsonObject(string json) =>
+        JsonNode.Parse(json) as JsonObject ?? new JsonObject();
 
     private static JsonNode? ParseOptionalJson(string? json) =>
         string.IsNullOrWhiteSpace(json) ? null : JsonNode.Parse(json);
