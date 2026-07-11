@@ -37,6 +37,12 @@ export function AppSidebar({ currentPath, onNavigate }: AppSidebarProps) {
           currentPath={currentPath}
           onNavigate={onNavigate}
         />
+        <NavGroup
+          label="Service"
+          routes={routes.filter((route) => route.group === 'service')}
+          currentPath={currentPath}
+          onNavigate={onNavigate}
+        />
       </nav>
     </aside>
   );

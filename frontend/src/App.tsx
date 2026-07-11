@@ -1,13 +1,8 @@
 import * as React from 'react';
-import { Home, Search } from 'lucide-react';
+import { Search } from 'lucide-react';
 
 import { AppSidebar } from '@/components/app-sidebar';
-import { Badge } from '@/components/ui/badge';
-import { buttonVariants } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { cn } from '@/lib/utils';
-import { routeDetails, routeTitles } from '@/routes';
 
 function getCurrentPath() {
   return window.location.pathname || '/';
@@ -51,14 +46,6 @@ export function App() {
     }
   }, [currentPath]);
 
-  const title = routeTitles.get(currentPath) ?? 'Not Found';
-  const routeDetail = routeDetails.get(currentPath) ?? {
-    eyebrow: 'Missing',
-    title,
-    summary: 'No matching Nodeck route exists for this URL.',
-    items: ['Use the sidebar', 'Return home', 'Choose a known route'],
-  };
-
   return (
     <div className="min-h-screen bg-background text-foreground">
       <div className="grid min-h-screen grid-cols-[17rem_1fr]">
@@ -77,44 +64,7 @@ export function App() {
             </div>
           </header>
 
-          <main className="min-w-0 flex-1 p-6">
-            <section className="mx-auto flex w-full max-w-5xl flex-col gap-5">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <Badge variant="outline">{routeDetail.eyebrow}</Badge>
-                  <h1 className="mt-3 text-2xl font-semibold tracking-normal">
-                    {routeDetail.title}
-                  </h1>
-                </div>
-                {currentPath !== '/' ? (
-                  <a
-                    href="/"
-                    onClick={navigate}
-                    className={cn(buttonVariants({ variant: 'outline' }), 'gap-2')}
-                  >
-                    <Home className="size-4" />
-                    Home
-                  </a>
-                ) : null}
-              </div>
-
-              <Card>
-                <CardHeader>
-                  <CardTitle>{routeDetail.summary}</CardTitle>
-                </CardHeader>
-                <CardContent className="grid gap-3 sm:grid-cols-3">
-                  {routeDetail.items.map((item) => (
-                    <div
-                      key={item}
-                      className="border-border bg-muted/30 rounded-lg border px-3 py-2 text-sm"
-                    >
-                      {item}
-                    </div>
-                  ))}
-                </CardContent>
-              </Card>
-            </section>
-          </main>
+          <main className="min-w-0 flex-1" />
         </div>
       </div>
     </div>
