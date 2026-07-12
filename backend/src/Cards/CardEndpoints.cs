@@ -232,14 +232,17 @@ public static class CardEndpoints
         PreviewService previewService,
         long id)
     {
-        var deleted = await repository.DeleteAsync(id);
+        var deletedCardIds = await repository.DeleteAsync(id);
 
-        if (!deleted)
+        if (deletedCardIds.Count == 0)
         {
             return Results.NotFound(new { error = "Card not found." });
         }
 
-        previewService.DeleteCardFiles(id);
+        foreach (var deletedCardId in deletedCardIds)
+        {
+            previewService.DeleteCardFiles(deletedCardId);
+        }
 
         return Results.NoContent();
     }

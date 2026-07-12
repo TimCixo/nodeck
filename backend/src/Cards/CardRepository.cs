@@ -320,18 +320,65 @@ public sealed class CardRepository
         return ToDetails(updatedCard, outgoingRelations, incomingRelations, containedCards);
     }
 
-    public async Task<bool> DeleteAsync(long id)
+    public async Task<IReadOnlyList<long>> DeleteAsync(long id)
     {
         await using var connection = new MySqlConnection(_connectionString);
+        await connection.OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+
+        var card = await connection.QuerySingleOrDefaultAsync<DbCard>(
+            """
+            SELECT
+                id AS Id,
+                type AS Type,
+                title AS Title,
+                preview AS Preview,
+                properties AS Properties,
+                metadata AS Metadata
+            FROM cards
+            WHERE id = @Id
+            FOR UPDATE;
+            """,
+            new { Id = id },
+            transaction);
+
+        if (card is null)
+        {
+            await transaction.RollbackAsync();
+            return [];
+        }
+
+        var deletedCardIds = new List<long> { id };
+
+        if (card.Type is "comic" or "set")
+        {
+            var containedCardIds = await connection.QueryAsync<long>(
+                """
+                SELECT c.id
+                FROM card_relations r
+                JOIN cards c ON c.id = r.to_card_id
+                WHERE r.from_card_id = @Id
+                  AND r.relation_type = 'contains'
+                  AND c.type = 'media'
+                ORDER BY r.id ASC;
+                """,
+                new { Id = id },
+                transaction);
+
+            deletedCardIds.AddRange(containedCardIds);
+        }
 
         var affectedRows = await connection.ExecuteAsync(
             """
             DELETE FROM cards
-            WHERE id = @Id;
+            WHERE id IN @Ids;
             """,
-            new { Id = id });
+            new { Ids = deletedCardIds },
+            transaction);
 
-        return affectedRows > 0;
+        await transaction.CommitAsync();
+
+        return affectedRows > 0 ? deletedCardIds : [];
     }
 
     public async Task<CardDetails?> GetByIdAsync(long id)
@@ -638,7 +685,7 @@ public sealed class CardRepository
             {
                 relations.Add(new CardRelationResponse(
                     relations.Count + 1,
-                    childCardId - 1,
+                    childCardIds[index - 1],
                     childCardId,
                     "next_in_sequence",
                     null,
