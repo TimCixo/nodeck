@@ -94,25 +94,20 @@ public static class CardEndpoints
 
                 if (form.Files.Count > 0)
                 {
-                    return Results.BadRequest(new { error = $"{type} cards do not support image uploads." });
+                    return Results.BadRequest(new { error = $"{type} cards do not support media uploads." });
                 }
             }
 
             if (image is not null && type != "media")
             {
-                return Results.BadRequest(new { error = "Image uploads are only supported for media cards." });
-            }
-
-            if (image is not null && !IsSupportedStaticImage(image))
-            {
-                return Results.BadRequest(new { error = $"Unsupported image file '{image.FileName}'." });
+                return Results.BadRequest(new { error = "Media uploads are only supported for media cards." });
             }
 
             var created = await repository.CreateAsync(
                 new CreateCardData(type, title, propertiesJson, metadata, relations),
                 async cardId => image is null
                     ? null
-                    : await previewService.SaveImageAndCreatePreviewAsync(cardId, image),
+                    : await previewService.SaveMediaAndCreatePreviewAsync(cardId, image),
                 previewService.DeleteCardFiles);
 
             return Results.Created($"/api/cards/{created.Id}", created);
@@ -191,7 +186,7 @@ public static class CardEndpoints
 
         if (image is not null && currentCard.Type != "media")
         {
-            return Results.BadRequest(new { error = "Image uploads are only supported for media cards." });
+            return Results.BadRequest(new { error = "Media uploads are only supported for media cards." });
         }
 
         var title = NormalizeOptionalString(form["title"].ToString());
@@ -208,12 +203,19 @@ public static class CardEndpoints
 
         try
         {
-            var assets = image is null
-                ? null
-                : await previewService.SaveImageAndCreatePreviewAsync(id, image);
+            PendingCardFileReplacement? replacement = null;
+
+            if (image is not null)
+            {
+                replacement = await previewService.PrepareMediaReplacementAsync(id, image);
+            }
+
             var updated = await repository.UpdateAsync(
                 id,
-                new UpdateCardData(title, propertiesJson, relations, assets));
+                new UpdateCardData(title, propertiesJson, relations, replacement?.Assets),
+                replacement?.PromoteAsync,
+                replacement?.Rollback,
+                replacement?.CleanupAfterCommit);
 
             return updated is null ? Results.NotFound(new { error = "Card not found." }) : Results.Ok(updated);
         }
