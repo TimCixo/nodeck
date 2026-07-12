@@ -103,7 +103,8 @@ public sealed class CardRepository
                             "contains",
                             new JsonObject { ["position"] = index }.ToJsonString(),
                             CreateMetadata()),
-                    ]);
+                    ],
+                    validateRelations: false);
 
                 if (data.Type == "comic" && previousMediaId is not null)
                 {
@@ -117,7 +118,8 @@ public sealed class CardRepository
                                 "next_in_sequence",
                                 null,
                                 CreateMetadata()),
-                        ]);
+                        ],
+                        validateRelations: false);
                 }
 
                 previousMediaId = mediaId;
@@ -174,6 +176,8 @@ public sealed class CardRepository
         string? mediaType,
         string? search,
         bool excludeContainedMedia,
+        IReadOnlyList<long> tagIds,
+        long? sourceId,
         string sort,
         string order)
     {
@@ -211,6 +215,35 @@ public sealed class CardRepository
                       AND r.relation_type = 'contains'
                 )
                 """);
+        }
+
+        for (var index = 0; index < tagIds.Count; index++)
+        {
+            var parameterName = $"TagId{index}";
+            conditions.Add($"""
+                EXISTS (
+                    SELECT 1
+                    FROM card_relations relation_tags
+                    WHERE relation_tags.from_card_id = cards.id
+                      AND relation_tags.relation_type = 'tagged_with'
+                      AND relation_tags.to_card_id = @{parameterName}
+                )
+                """);
+            parameters.Add(parameterName, tagIds[index]);
+        }
+
+        if (sourceId is not null)
+        {
+            conditions.Add("""
+                EXISTS (
+                    SELECT 1
+                    FROM card_relations relation_sources
+                    WHERE relation_sources.from_card_id = cards.id
+                      AND relation_sources.relation_type = 'sourced_from'
+                      AND relation_sources.to_card_id = @SourceId
+                )
+                """);
+            parameters.Add("SourceId", sourceId.Value);
         }
 
         var where = conditions.Count > 0 ? $"WHERE {string.Join(" AND ", conditions)}" : "";
@@ -453,6 +486,141 @@ public sealed class CardRepository
         return ToDetails(card, outgoing, incoming, containedCards);
     }
 
+    public async Task<CardRelationsResponse?> GetRelationsFeedAsync(long id)
+    {
+        await using var connection = new MySqlConnection(_connectionString);
+
+        var cardExists = await connection.ExecuteScalarAsync<long?>(
+            """
+            SELECT id
+            FROM cards
+            WHERE id = @Id;
+            """,
+            new { Id = id });
+
+        if (cardExists is null)
+        {
+            return null;
+        }
+
+        var rows = await GetRelationLinkRowsAsync(connection, id);
+
+        return new CardRelationsResponse(
+            rows.Where(row => string.Equals(row.Direction, "outgoing", StringComparison.OrdinalIgnoreCase))
+                .Select(ToRelationEntry)
+                .ToList(),
+            rows.Where(row => string.Equals(row.Direction, "incoming", StringComparison.OrdinalIgnoreCase))
+                .Select(ToRelationEntry)
+                .ToList());
+    }
+
+    public async Task<CardRelationEntry> CreateRelationAsync(long cardId, CreateCardRelationRequest request)
+    {
+        await using var connection = new MySqlConnection(_connectionString);
+        await connection.OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+
+        var relation = await CreateRelationAsync(connection, transaction, cardId, request.ToCardId, request.RelationType, request.Properties);
+        await transaction.CommitAsync();
+
+        return relation;
+    }
+
+    public async Task<CardRelationEntry?> UpdateRelationAsync(long relationId, UpdateCardRelationRequest request)
+    {
+        await using var connection = new MySqlConnection(_connectionString);
+        await connection.OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+
+        var relation = await connection.QuerySingleOrDefaultAsync<DbCardRelation>(
+            """
+            SELECT
+                id AS Id,
+                from_card_id AS FromCardId,
+                to_card_id AS ToCardId,
+                relation_type AS RelationType,
+                properties AS Properties,
+                metadata AS Metadata
+            FROM card_relations
+            WHERE id = @Id
+            FOR UPDATE;
+            """,
+            new { Id = relationId },
+            transaction);
+
+        if (relation is null)
+        {
+            await transaction.RollbackAsync();
+            return null;
+        }
+
+        if (!IsGenericEditableRelationType(relation.RelationType))
+        {
+            throw new InvalidOperationException($"Relation type '{relation.RelationType}' cannot be edited generically.");
+        }
+
+        var propertiesJson = request.Properties?.ToJsonString();
+
+        await connection.ExecuteAsync(
+            """
+            UPDATE card_relations
+            SET properties = @Properties
+            WHERE id = @Id;
+            """,
+            new { Id = relationId, Properties = propertiesJson },
+            transaction);
+
+        await transaction.CommitAsync();
+
+        return await GetRelationEntryAsync(connection, relationId, relation.FromCardId);
+    }
+
+    public async Task<bool> DeleteRelationAsync(long relationId)
+    {
+        await using var connection = new MySqlConnection(_connectionString);
+        await connection.OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+
+        var relation = await connection.QuerySingleOrDefaultAsync<DbCardRelation>(
+            """
+            SELECT
+                id AS Id,
+                from_card_id AS FromCardId,
+                to_card_id AS ToCardId,
+                relation_type AS RelationType,
+                properties AS Properties,
+                metadata AS Metadata
+            FROM card_relations
+            WHERE id = @Id
+            FOR UPDATE;
+            """,
+            new { Id = relationId },
+            transaction);
+
+        if (relation is null)
+        {
+            await transaction.RollbackAsync();
+            return false;
+        }
+
+        if (!IsGenericEditableRelationType(relation.RelationType))
+        {
+            throw new InvalidOperationException($"Relation type '{relation.RelationType}' cannot be deleted generically.");
+        }
+
+        var affectedRows = await connection.ExecuteAsync(
+            """
+            DELETE FROM card_relations
+            WHERE id = @Id;
+            """,
+            new { Id = relationId },
+            transaction);
+
+        await transaction.CommitAsync();
+
+        return affectedRows > 0;
+    }
+
     private static async Task<long> InsertCardAsync(
         IDbConnection connection,
         IDbTransaction transaction,
@@ -556,10 +724,15 @@ public sealed class CardRepository
         IDbConnection connection,
         IDbTransaction transaction,
         long fromCardId,
-        IReadOnlyList<CreateRelationData> relations)
+        IReadOnlyList<CreateRelationData> relations,
+        bool validateRelations = true)
     {
         foreach (var relation in relations)
         {
+            if (validateRelations)
+            {
+                await ValidateRelationAsync(connection, transaction, fromCardId, relation.ToCardId, relation.RelationType, null);
+            }
             await connection.ExecuteAsync(
                 """
                 INSERT INTO card_relations (
@@ -599,6 +772,244 @@ public sealed class CardRepository
               AND favorite_deck_cards.card_id = {cardIdExpression}
         ) THEN 1 ELSE 0 END
         """;
+
+    private async Task<CardRelationEntry> CreateRelationAsync(
+        IDbConnection connection,
+        IDbTransaction transaction,
+        long fromCardId,
+        long toCardId,
+        string relationType,
+        JsonObject? properties)
+    {
+        await ValidateRelationAsync(connection, transaction, fromCardId, toCardId, relationType, null);
+
+        var relationId = await connection.ExecuteScalarAsync<long>(
+            """
+            INSERT INTO card_relations (
+                from_card_id,
+                to_card_id,
+                relation_type,
+                properties,
+                metadata
+            )
+            VALUES (
+                @FromCardId,
+                @ToCardId,
+                @RelationType,
+                @Properties,
+                @Metadata
+            );
+            SELECT LAST_INSERT_ID();
+            """,
+            new
+            {
+                FromCardId = fromCardId,
+                ToCardId = toCardId,
+                RelationType = relationType,
+                Properties = properties?.ToJsonString(),
+                Metadata = CreateMetadata().ToJsonString(),
+            },
+            transaction);
+
+        return await GetRelationEntryAsync(connection, relationId, fromCardId)
+            ?? throw new InvalidOperationException("Created relation could not be read.");
+    }
+
+    private static async Task ValidateRelationAsync(
+        IDbConnection connection,
+        IDbTransaction transaction,
+        long fromCardId,
+        long toCardId,
+        string relationType,
+        long? ignoreRelationId)
+    {
+        if (!IsGenericEditableRelationType(relationType))
+        {
+            throw new InvalidOperationException($"Relation type '{relationType}' cannot be managed through the generic relation API.");
+        }
+
+        if (fromCardId == toCardId)
+        {
+            throw new InvalidOperationException("Self relations are not allowed.");
+        }
+
+        var endpoints = await connection.QueryAsync<DbCardType>(
+            """
+            SELECT
+                id AS Id,
+                type AS Type
+            FROM cards
+            WHERE id IN @Ids;
+            """,
+            new { Ids = new[] { fromCardId, toCardId } },
+            transaction);
+
+        var types = endpoints.ToDictionary(card => card.Id, card => card.Type);
+        if (!types.TryGetValue(fromCardId, out var fromType) || !types.TryGetValue(toCardId, out var toType))
+        {
+            throw new InvalidOperationException("Relations must reference existing cards.");
+        }
+
+        if (relationType == "tagged_with")
+        {
+            if (!IsTaggableCardType(fromType))
+            {
+                throw new InvalidOperationException("Only media, comic, set, and source cards can be tagged.");
+            }
+
+            if (toType != "tag")
+            {
+                throw new InvalidOperationException("Tagged relations must point to a tag card.");
+            }
+        }
+        else if (relationType == "sourced_from")
+        {
+            if (!IsSourceableCardType(fromType))
+            {
+                throw new InvalidOperationException("Only media, comic, and set cards can have sources.");
+            }
+
+            if (toType != "source")
+            {
+                throw new InvalidOperationException("Source relations must point to a source card.");
+            }
+        }
+        else if (relationType == "related_to")
+        {
+            // Any card type is allowed, but reverse duplicates are rejected below.
+        }
+        else
+        {
+            throw new InvalidOperationException($"Relation type '{relationType}' cannot be managed through the generic relation API.");
+        }
+
+        var existingCount = relationType == "related_to"
+            ? await connection.ExecuteScalarAsync<long>(
+                """
+                SELECT COUNT(*)
+                FROM card_relations
+                WHERE relation_type = @RelationType
+                  AND (
+                    (from_card_id = @FromCardId AND to_card_id = @ToCardId)
+                    OR (from_card_id = @ToCardId AND to_card_id = @FromCardId)
+                  )
+                  AND (@IgnoreRelationId IS NULL OR id <> @IgnoreRelationId);
+                """,
+                new
+                {
+                    FromCardId = fromCardId,
+                    ToCardId = toCardId,
+                    RelationType = relationType,
+                    IgnoreRelationId = ignoreRelationId,
+                },
+                transaction)
+            : await connection.ExecuteScalarAsync<long>(
+                """
+                SELECT COUNT(*)
+                FROM card_relations
+                WHERE from_card_id = @FromCardId
+                  AND to_card_id = @ToCardId
+                  AND relation_type = @RelationType
+                  AND (@IgnoreRelationId IS NULL OR id <> @IgnoreRelationId);
+                """,
+                new
+                {
+                    FromCardId = fromCardId,
+                    ToCardId = toCardId,
+                    RelationType = relationType,
+                    IgnoreRelationId = ignoreRelationId,
+                },
+                transaction);
+
+        if (existingCount > 0)
+        {
+            throw new InvalidOperationException("This relation already exists.");
+        }
+    }
+
+    private static bool IsGenericEditableRelationType(string relationType) =>
+        relationType is "tagged_with" or "sourced_from" or "related_to";
+
+    private static bool IsTaggableCardType(string type) =>
+        type is "media" or "comic" or "set" or "source";
+
+    private static bool IsSourceableCardType(string type) =>
+        type is "media" or "comic" or "set";
+
+    private static async Task<CardRelationEntry?> GetRelationEntryAsync(
+        IDbConnection connection,
+        long relationId,
+        long currentCardId,
+        IDbTransaction? transaction = null)
+    {
+        var rows = await GetRelationLinkRowsAsync(connection, currentCardId, transaction, relationId);
+        return rows.Select(ToRelationEntry).FirstOrDefault();
+    }
+
+    private static async Task<IReadOnlyList<DbRelationLinkRow>> GetRelationLinkRowsAsync(
+        IDbConnection connection,
+        long cardId,
+        IDbTransaction? transaction = null,
+        long? relationId = null)
+    {
+        var rows = await connection.QueryAsync<DbRelationLinkRow>(
+            $"""
+            SELECT
+                r.id AS Id,
+                r.relation_type AS RelationType,
+                CASE
+                    WHEN r.from_card_id = @CardId THEN 'outgoing'
+                    ELSE 'incoming'
+                END AS Direction,
+                CASE
+                    WHEN r.from_card_id = @CardId THEN r.to_card_id
+                    ELSE r.from_card_id
+                END AS RelatedCardId,
+                c.type AS RelatedCardType,
+                c.title AS RelatedCardTitle,
+                c.preview AS RelatedCardPreview,
+                c.metadata AS RelatedCardMetadata,
+                r.properties AS Properties
+            FROM card_relations r
+            JOIN cards c ON c.id = CASE
+                WHEN r.from_card_id = @CardId THEN r.to_card_id
+                ELSE r.from_card_id
+            END
+            WHERE (r.from_card_id = @CardId OR r.to_card_id = @CardId)
+              AND r.relation_type <> 'preview_for'
+              {(relationId is null ? "" : "AND r.id = @RelationId")}
+            ORDER BY
+                CASE r.relation_type
+                    WHEN 'tagged_with' THEN 1
+                    WHEN 'sourced_from' THEN 2
+                    WHEN 'related_to' THEN 3
+                    WHEN 'contains' THEN 4
+                    WHEN 'next_in_sequence' THEN 5
+                    ELSE 6
+                END,
+                r.id ASC;
+            """,
+            relationId is null
+                ? new { CardId = cardId }
+                : new { CardId = cardId, RelationId = relationId },
+            transaction);
+
+        return rows.ToList();
+    }
+
+    private static CardRelationEntry ToRelationEntry(DbRelationLinkRow row)
+    {
+        return new CardRelationEntry(
+            row.Id,
+            row.RelationType,
+            row.Direction,
+            new RelationCardSummary(
+                row.RelatedCardId,
+                row.RelatedCardType,
+                row.RelatedCardTitle,
+                row.RelatedCardPreview is null ? null : $"/api/cards/{row.RelatedCardId}/preview"),
+            ParseOptionalJson(row.Properties));
+    }
 
     private static CardSummary ToSummary(DbCard card)
     {

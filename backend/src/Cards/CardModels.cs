@@ -34,6 +34,31 @@ public sealed record ContainedCardResponse(
     bool IsFavorite,
     int Position);
 
+public sealed record RelationCardSummary(
+    long Id,
+    string Type,
+    string? Title,
+    string? PreviewUrl);
+
+public sealed record CardRelationEntry(
+    long Id,
+    string RelationType,
+    string Direction,
+    RelationCardSummary RelatedCard,
+    JsonNode? Properties);
+
+public sealed record CardRelationsResponse(
+    IReadOnlyList<CardRelationEntry> OutgoingRelations,
+    IReadOnlyList<CardRelationEntry> IncomingRelations);
+
+public sealed record CreateCardRelationRequest(
+    long ToCardId,
+    string RelationType,
+    JsonObject? Properties);
+
+public sealed record UpdateCardRelationRequest(
+    JsonObject? Properties);
+
 public sealed record CardRelationResponse(
     long Id,
     long FromCardId,
@@ -90,6 +115,10 @@ internal sealed record DbCard(
     string Metadata,
     long IsFavorite);
 
+internal sealed record DbCardType(
+    long Id,
+    string Type);
+
 internal sealed record DbCardRelation(
     long Id,
     long FromCardId,
@@ -97,6 +126,17 @@ internal sealed record DbCardRelation(
     string RelationType,
     string? Properties,
     string Metadata);
+
+internal sealed record DbRelationLinkRow(
+    long Id,
+    string RelationType,
+    string Direction,
+    long RelatedCardId,
+    string RelatedCardType,
+    string? RelatedCardTitle,
+    string? RelatedCardPreview,
+    string RelatedCardMetadata,
+    string? Properties);
 
 internal sealed class ContainedCardRow
 {
