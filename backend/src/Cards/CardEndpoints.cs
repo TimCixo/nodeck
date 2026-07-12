@@ -210,12 +210,16 @@ public static class CardEndpoints
                 replacement = await previewService.PrepareMediaReplacementAsync(id, image);
             }
 
+            Func<Task>? promoteAssets = replacement is null ? null : replacement.PromoteAsync;
+            Action? rollbackAssets = replacement is null ? null : replacement.Rollback;
+            Action? cleanupPromotedAssets = replacement is null ? null : replacement.CleanupAfterCommit;
+
             var updated = await repository.UpdateAsync(
                 id,
                 new UpdateCardData(title, propertiesJson, relations, replacement?.Assets),
-                replacement?.PromoteAsync,
-                replacement?.Rollback,
-                replacement?.CleanupAfterCommit);
+                promoteAssets,
+                rollbackAssets,
+                cleanupPromotedAssets);
 
             return updated is null ? Results.NotFound(new { error = "Card not found." }) : Results.Ok(updated);
         }
