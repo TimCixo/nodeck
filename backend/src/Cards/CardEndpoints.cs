@@ -128,6 +128,8 @@ public static class CardEndpoints
         string? mediaType,
         string? media_type,
         string? types,
+        string? tags,
+        string? source,
         string? search,
         string? exclude_contained_media,
         string? sort,
@@ -143,6 +145,8 @@ public static class CardEndpoints
             mediaType ?? media_type,
             search,
             IsTruthy(exclude_contained_media),
+            ParseLongList(tags),
+            ParseLongOrNull(source),
             sort ?? "created_at",
             order ?? "desc");
 
@@ -482,4 +486,22 @@ public static class CardEndpoints
             || string.Equals(value, "1", StringComparison.OrdinalIgnoreCase)
             || string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase));
     }
+
+    private static IReadOnlyList<long> ParseLongList(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return [];
+        }
+
+        return value
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(item => long.TryParse(item, out var parsed) ? parsed : 0)
+            .Where(item => item > 0)
+            .Distinct()
+            .ToList();
+    }
+
+    private static long? ParseLongOrNull(string? value) =>
+        long.TryParse(value, out var parsed) && parsed > 0 ? parsed : null;
 }
