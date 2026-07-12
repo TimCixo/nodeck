@@ -489,7 +489,7 @@ public sealed class CardRepository
     private static CardSummary ToSummary(DbCard card)
     {
         var metadata = ParseRequiredJson(card.Metadata);
-        var contentPath = GetMetadataString(metadata, "content_path");
+        var contentPath = metadata["content_path"]?.GetValue<string>();
 
         return new CardSummary(
             card.Id,
@@ -536,7 +536,7 @@ public sealed class CardRepository
     private static ContainedCardResponse ToContainedCard(ContainedCardRow card)
     {
         var metadata = ParseRequiredJson(card.Metadata);
-        var contentPath = GetMetadataString(metadata, "content_path");
+        var contentPath = metadata["content_path"]?.GetValue<string>();
 
         return new ContainedCardResponse(
             card.Id,
@@ -566,7 +566,7 @@ public sealed class CardRepository
     }
 
     private static JsonNode ParseRequiredJson(string json) =>
-        JsonNode.Parse(json) as JsonObject ?? new JsonObject();
+        JsonNode.Parse(json) ?? new JsonObject();
 
     private static JsonObject ParseRequiredJsonObject(string json) =>
         JsonNode.Parse(json) as JsonObject ?? new JsonObject();
@@ -650,14 +650,4 @@ public sealed class CardRepository
 
     private static JsonNode? ParseOptionalJson(string? json) =>
         string.IsNullOrWhiteSpace(json) ? null : JsonNode.Parse(json);
-
-    private static string? GetMetadataString(JsonNode metadata, string key)
-    {
-        if (metadata is not JsonObject metadataObject)
-        {
-            return null;
-        }
-
-        return metadataObject[key]?.GetValue<string>();
-    }
 }

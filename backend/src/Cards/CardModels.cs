@@ -92,10 +92,17 @@ internal sealed record DbCardRelation(
     string? Properties,
     string Metadata);
 
-internal sealed record ContainedCardRow(
-    long Id,
-    string Type,
-    string? Title,
-    string? Preview,
-    string Metadata,
-    int Position);
+internal sealed class ContainedCardRow
+{
+    public long Id { get; init; }
+
+    public string Type { get; init; } = "";
+
+    public string? Title { get; init; }
+
+    public string? Preview { get; init; }
+
+    public string Metadata { get; init; } = "";
+
+    public int Position { get; init; }
+}

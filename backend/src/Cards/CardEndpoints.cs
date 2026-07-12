@@ -248,7 +248,7 @@ public static class CardEndpoints
         long id)
     {
         var card = await repository.GetByIdAsync(id);
-        var contentPath = GetMetadataString(card?.Metadata, "content_path");
+        var contentPath = card?.Metadata["content_path"]?.GetValue<string>();
 
         if (contentPath is null)
         {
@@ -274,7 +274,7 @@ public static class CardEndpoints
             return Results.NotFound(new { error = "Card preview not found." });
         }
 
-        var previewPath = GetMetadataString(card.Metadata, "preview_path");
+        var previewPath = card.Metadata["preview_path"]?.GetValue<string>();
 
         if (previewPath is null)
         {
@@ -462,15 +462,5 @@ public static class CardEndpoints
         requestedTypes = rawTypes.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
         return true;
-    }
-
-    private static string? GetMetadataString(JsonNode? metadata, string key)
-    {
-        if (metadata is not JsonObject metadataObject)
-        {
-            return null;
-        }
-
-        return metadataObject[key]?.GetValue<string>();
     }
 }
